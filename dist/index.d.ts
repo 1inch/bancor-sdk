@@ -1,31 +1,39 @@
-import { buildPathsFile } from './blockchains/eos';
-import { Token, ConversionPaths } from './path_generation';
-interface Settings {
-    ethereumNodeEndpoint: string;
-    eosNodeEndpoint: string;
-    ethereumContractRegistryAddress?: string;
+import { Core } from './core';
+import { History } from './history';
+import { Pricing } from './pricing';
+import { Utils } from './utils';
+import { Settings } from './types';
+/**
+ * Main SDK object, should be instantiated using the `create` static method
+ */
+export declare class SDK {
+    /** History module */
+    history: History;
+    /** Pricing module */
+    pricing: Pricing;
+    /** Utils module */
+    utils: Utils;
+    /** @internal */
+    _core: Core;
+    /**
+    * creates and initializes a new SDK object
+    * should be called as the first step before using the SDK
+    *
+    * @param settings   initialization settings
+    *
+    * @returns  new SDK object
+    */
+    static create(settings: Settings): Promise<SDK>;
+    /**
+    * cleans up and destroys an existing SDK object
+    * should be called as the last step after the SDK work is complete to free up resources
+    *
+    * @param sdk   sdk object
+    */
+    static destroy(sdk: SDK): Promise<void>;
+    /**
+    * refreshes the local cache with data from the converter registry
+    * should be called periodically to support new pools
+    */
+    refresh(): Promise<void>;
 }
-export declare function init(args: Settings): Promise<void>;
-export declare function deinit(): Promise<void>;
-export declare function generateEosPaths(): Promise<void>;
-export declare function generatePath(sourceToken: Token, targetToken: Token, amount?: string, getBestPath?: typeof getCheapestPath): Promise<ConversionPaths>;
-export declare const calculateRateFromPaths: (paths: ConversionPaths, amount: any) => any;
-export declare function calculateRateFromPath(paths: ConversionPaths, amount: any): Promise<any>;
-export declare const getRateByPath: (paths: ConversionPaths, amount: any) => Promise<any>;
-export declare function getRate(sourceToken: Token, targetToken: Token, amount: string): Promise<any>;
-export declare function getAllPathsAndRates(sourceToken: Token, targetToken: Token, amount?: string): Promise<any[]>;
-declare function getShortestPath(paths: string[][], rates: string[]): string[];
-declare function getCheapestPath(paths: string[][], rates: string[]): string[];
-declare const _default: {
-    init: typeof init;
-    deinit: typeof deinit;
-    generateEosPaths: typeof generateEosPaths;
-    getRate: typeof getRate;
-    generatePath: typeof generatePath;
-    getRateByPath: (paths: ConversionPaths, amount: any) => Promise<any>;
-    buildPathsFile: typeof buildPathsFile;
-    getAllPathsAndRates: typeof getAllPathsAndRates;
-    getShortestPath: typeof getShortestPath;
-    getCheapestPath: typeof getCheapestPath;
-};
-export default _default;

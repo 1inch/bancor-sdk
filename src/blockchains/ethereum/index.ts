@@ -1,206 +1,295 @@
-/* eslint-disable max-len */
-/* eslint-disable no-sync */
-/* eslint-disable prefer-reflect */
 import Web3 from 'web3';
-import { BancorConverterV9 } from './contracts/BancorConverterV9';
-import { fromWei, toWei } from './utils';
-import { ConversionPathStep, Token } from '../../path_generation';
-import { BancorConverter } from './contracts/BancorConverter';
-import { ContractRegistry } from './contracts/ContractRegistry';
-import { BancorConverterRegistry } from './contracts/BancorConverterRegistry';
-import { BancorNetwork } from './contracts/BancorNetwork';
-import { SmartToken } from './contracts/SmartToken';
-import { ERC20Token } from './contracts/ERC20Token';
+import * as abis from './abis';
+import * as helpers from '../../helpers';
+import * as conversionEvents from './conversion_events';
+import * as converterVersion from './converter_version';
+import { timestampToBlockNumber } from './timestamp_to_block_number';
+import { Blockchain, BlockchainType, Converter, ConversionEvent, Token } from '../../types';
 
-const ETHBlockchainId = '0xc0829421c1d260bd3cb3e0f06cfe2d52db2ce315';
-const BNTBlockchainId = '0x1F573D6Fb3F13d689FF844B4cE37794d79a7FF1C';
-let web3;
-let bancorConverter = BancorConverter;
-let contractRegistry = ContractRegistry;
-let registryAbi = BancorConverterRegistry;
-let networkAbi = BancorNetwork;
-let registry;
-let network;
-
-export async function init(ethereumNodeUrl, ethereumContractRegistryAddress = '0xf078b4ec84e5fc57c693d43f1f4a82306c9b88d6') {
-    web3 = new Web3(ethereumNodeUrl);
-    const contractRegistryContract = new web3.eth.Contract(contractRegistry, ethereumContractRegistryAddress);
-    const registryBlockchainId = await contractRegistryContract.methods.addressOf(Web3.utils.asciiToHex('BancorConverterRegistry')).call();
-    const networkBlockchainId = await contractRegistryContract.methods.addressOf(Web3.utils.asciiToHex('BancorNetwork')).call();
-    registry = new web3.eth.Contract(registryAbi, registryBlockchainId);
-    network = new web3.eth.Contract(networkAbi, networkBlockchainId);
-}
-
-export async function deinit() {
-    if (web3 && web3.currentProvider.constructor.name == 'WebsocketProvider')
-        web3.currentProvider.connection.close();
-}
-
-export const getAmountInTokenWei = async (token: string, amount: string, web3) => {
-    const decimals = await getTokenDecimals(token);
-    return toWei(amount, decimals);
-};
-
-export const getConversionReturn = async (converterPair: ConversionPathStep, amount: string, ABI, web3) => {
-    let converterContract = new web3.eth.Contract(ABI, converterPair.converterBlockchainId);
-    const returnAmount = await converterContract.methods.getReturn(converterPair.fromToken, converterPair.toToken, amount).call();
-    return returnAmount;
-};
-
-export const getTokenDecimals = async tokenBlockchainId => {
-    let tokenDecimals = {
-        '0xe0b7927c4af23765cb51314a0e0521a9645f0e2a': '9',
-        '0xbdeb4b83251fb146687fa19d1c660f99411eefe3': '18'
-    };
-
-    if (tokenBlockchainId.toLowerCase() in tokenDecimals)
-        return tokenDecimals[tokenBlockchainId.toLowerCase()];
-
-    const token = new web3.eth.Contract(ERC20Token, tokenBlockchainId);
-    return await token.methods.decimals().call();
-};
-
-export async function getPathStepRate(converterPair: ConversionPathStep, amount: string) {
-    let amountInTokenWei = await getAmountInTokenWei((converterPair.fromToken as string), amount, web3);
-    const tokenBlockchainId = converterPair.toToken;
-    const tokenDecimals = await getTokenDecimals(tokenBlockchainId);
-    try {
-        const returnAmount = await getConversionReturn(converterPair, amountInTokenWei, bancorConverter, web3);
-        amountInTokenWei = returnAmount['0'];
-    }
-    catch (e) {
-        if (e.message.includes('insufficient data for uint256'))
-            amountInTokenWei = await getConversionReturn(converterPair, amountInTokenWei, BancorConverterV9, web3);
-
-        else throw (e);
-    }
-    return fromWei(amountInTokenWei, tokenDecimals);
-}
-
-export async function getRegistry() {
-    const contractRegistryContract = new web3.eth.Contract(contractRegistry, '0x52Ae12ABe5D8BD778BD5397F99cA900624CfADD4');
-    const registryBlockchainId = await contractRegistryContract.methods.addressOf(Web3.utils.asciiToHex('BancorConverterRegistry')).call();
-    return new web3.eth.Contract(registryAbi, registryBlockchainId);
-}
-
-export const getConverterBlockchainId = async blockchainId => {
-    const tokenContract = new web3.eth.Contract(SmartToken, blockchainId);
-    return await tokenContract.methods.owner().call();
-};
-
-export function getSourceAndTargetTokens(srcToken: string, trgToken: string) {
-    const isSourceETH = (srcToken || BNTBlockchainId).toLocaleLowerCase() == ETHBlockchainId.toLocaleLowerCase();
-    const sourceToken = isSourceETH ? BNTBlockchainId : (srcToken || BNTBlockchainId);
-    const targetToken = trgToken == ETHBlockchainId ? BNTBlockchainId : (trgToken || BNTBlockchainId);
-
-    return {
-        srcToken: sourceToken,
-        trgToken: targetToken
-    };
-}
-
-export async function getReserves(converterBlockchainId) {
-    const reserves = new web3.eth.Contract(bancorConverter, converterBlockchainId);
-    return { reserves };
-}
-
-export async function getReservesCount(reserves) {
-    return await getTokenCount(reserves, 'connectorTokenCount');
-}
-
-export async function getReserveBlockchainId(converter, position) {
-    const blockchainId = await converter.methods.connectorTokens(position).call();
-    const returnValue: Token = {
-        blockchainType: 'ethereum',
-        blockchainId
-    };
-
-    return returnValue;
-}
-
-export async function getConverterSmartToken(converter) {
-    return await converter.methods.token().call();
-}
-
-async function getTokenCount(converter: any, funcName: string) {
-    let response = null;
-    try {
-        response = await converter.methods[funcName]().call();
-        return response;
-    }
-    catch (error) {
-        if (!error.message.startsWith('Invalid JSON RPC response')) {
-            response = 0;
-            return response;
+const CONTRACT_ADDRESSES = {
+    main: {
+        registry: '0x52Ae12ABe5D8BD778BD5397F99cA900624CfADD4',
+        multicall: '0x5Eb3fa2DFECdDe21C950813C665E9364fa609bD2',
+        anchorToken: '0x1F573D6Fb3F13d689FF844B4cE37794d79a7FF1C',
+        pivotTokens: [
+            '0x1F573D6Fb3F13d689FF844B4cE37794d79a7FF1C',
+            '0x309627af60F0926daa6041B8279484312f2bf060'
+        ],
+        nonStandardTokenDecimals: {
+            '0xE0B7927c4aF23765Cb51314A0E0521A9645F0E2A': '9',
+            '0xbdEB4b83251Fb146687fa19D1C660F99411eefe3': '18'
+        }
+    },
+    ropsten: {
+        registry: '0xFD95E724962fCfC269010A0c6700Aa09D5de3074',
+        multicall: '0xf3ad7e31b052ff96566eedd218a823430e74b406',
+        anchorToken: '0x62bd9D98d4E188e281D7B78e29334969bbE1053c',
+        pivotTokens: [
+            '0x62bd9D98d4E188e281D7B78e29334969bbE1053c'
+        ],
+        nonStandardTokenDecimals: {
+        }
+    },
+    dummy: {
+        registry: '0x0000000000000000000000000000000000000000',
+        multicall: '0x0000000000000000000000000000000000000000',
+        anchorToken: '0x0000000000000000000000000000000000000000',
+        pivotTokens: [
+        ],
+        nonStandardTokenDecimals: {
         }
     }
+};
+
+export class Ethereum implements Blockchain {
+    web3: Web3;
+    networkType: string;
+    bancorNetwork: Web3.eth.Contract;
+    converterRegistry: Web3.eth.Contract;
+    multicallContract: Web3.eth.Contract;
+    decimals: object;
+    graph: object;
+    trees: object;
+    getPathsFunc: (sourceToken: string, targetToken: string) => string[][];
+
+    static async create(nodeEndpoint: string | Object): Promise<Ethereum> {
+        const ethereum = new Ethereum();
+        ethereum.web3 = getWeb3(nodeEndpoint);
+        ethereum.networkType = await ethereum.web3.eth.net.getNetworkType();
+        const contractRegistry = new ethereum.web3.eth.Contract(abis.ContractRegistry, getContractAddresses(ethereum).registry);
+        const bancorNetworkAddress = await contractRegistry.methods.addressOf(Web3.utils.asciiToHex('BancorNetwork')).call();
+        const converterRegistryAddress = await contractRegistry.methods.addressOf(Web3.utils.asciiToHex('BancorConverterRegistry')).call();
+        ethereum.bancorNetwork = new ethereum.web3.eth.Contract(abis.BancorNetwork, bancorNetworkAddress);
+        ethereum.converterRegistry = new ethereum.web3.eth.Contract(abis.BancorConverterRegistry, converterRegistryAddress);
+        ethereum.multicallContract = new ethereum.web3.eth.Contract(abis.MulticallContract, getContractAddresses(ethereum).multicall);
+        ethereum.decimals = {...CONTRACT_ADDRESSES[ethereum.networkType].nonStandardTokenDecimals};
+        ethereum.getPathsFunc = ethereum.getSomePathsFunc;
+        await ethereum.refresh();
+        return ethereum;
+    }
+
+    static async destroy(ethereum: Ethereum): Promise<void> {
+        if (ethereum.web3.currentProvider && ethereum.web3.currentProvider.constructor.name == 'WebsocketProvider')
+            ethereum.web3.currentProvider.connection.close();
+    }
+
+    async refresh(): Promise<void> {
+        this.graph = getGraph(await getTokens(this));
+        this.trees = getTrees(this.graph, getContractAddresses(this).pivotTokens);
+    }
+
+    getAnchorToken(): Token {
+        return {blockchainType: BlockchainType.Ethereum, blockchainId: getContractAddresses(this).anchorToken};
+    }
+
+    async getPaths(sourceToken: Token, targetToken: Token): Promise<Token[][]> {
+        const sourceAddress = Web3.utils.toChecksumAddress(sourceToken.blockchainId);
+        const targetAddress = Web3.utils.toChecksumAddress(targetToken.blockchainId);
+        const addressPaths = this.getPathsFunc(sourceAddress, targetAddress);
+        return addressPaths.map(addressPath => addressPath.map(address => ({blockchainType: BlockchainType.Ethereum, blockchainId: address})));
+    }
+
+    async getRates(tokenPaths: Token[][], tokenAmount: string): Promise<string[]> {
+        const addressPaths = tokenPaths.map(tokenPath => tokenPath.map(token => Web3.utils.toChecksumAddress(token.blockchainId)));
+        const sourceDecimals = await getDecimals(this, addressPaths[0][0]);
+        const targetDecimals = await getDecimals(this, addressPaths[0].slice(-1)[0]);
+        const tokenRates = await getRatesSafe(this, addressPaths, helpers.toWei(tokenAmount, sourceDecimals));
+        return tokenRates.map(tokenRate => helpers.fromWei(tokenRate, targetDecimals));
+    }
+
+    async getConverterVersion(converter: Converter): Promise<string> {
+        return (await converterVersion.get(this.web3, converter.blockchainId)).value;
+    }
+
+    async getConversionEvents(token: Token, fromBlock: number, toBlock: number): Promise<ConversionEvent[]> {
+        return await conversionEvents.get(this.web3, this.decimals, token.blockchainId, fromBlock, toBlock);
+    }
+
+    async getConversionEventsByTimestamp(token: Token, fromTimestamp: number, toTimestamp: number): Promise<ConversionEvent[]> {
+        const fromBlock = await timestampToBlockNumber(this.web3, fromTimestamp);
+        const toBlock = await timestampToBlockNumber(this.web3, toTimestamp);
+        return await conversionEvents.get(this.web3, this.decimals, token.blockchainId, fromBlock, toBlock);
+    }
+
+    getAllPathsFunc(sourceToken: string, targetToken: string): string[][] {
+        const paths = [];
+        const tokens = [Web3.utils.toChecksumAddress(sourceToken)];
+        const destToken = Web3.utils.toChecksumAddress(targetToken);
+        getAllPathsRecursive(paths, this.graph, tokens, destToken);
+        return paths;
+    }
+
+    getSomePathsFunc(sourceToken: string, targetToken: string): string[][] {
+        const commonTokens = this.graph[sourceToken].filter(token => this.graph[targetToken].includes(token));
+        const paths = commonTokens.map(commonToken => [sourceToken, commonToken, targetToken]);
+        const pivotTokens = getContractAddresses(this).pivotTokens;
+        for (const pivotToken1 of pivotTokens) {
+            for (const pivotToken2 of pivotTokens) {
+                const sourcePath = getOnePathRecursive(this.trees[pivotToken1], sourceToken);
+                const middlePath = getOnePathRecursive(this.trees[pivotToken2], pivotToken1);
+                const targetPath = getOnePathRecursive(this.trees[pivotToken2], targetToken);
+                paths.push(getMergedPath(sourcePath.concat(middlePath.slice(1)), targetPath));
+            }
+        }
+        return Array.from(new Set<string>(paths.map(path => path.join(',')))).map(path => path.split(','));
+    }
+
+    private static getNormalizedToken(token: Token): Token {
+        return Object.assign({}, token, { blockchainId: Web3.utils.toChecksumAddress(token.blockchainId) });
+    }
 }
 
-export async function getReserveToken(converterContract, i) {
-    const blockchainId = await converterContract.methods.connectorTokens(i).call();
-    const token: Token = {
-        blockchainType: 'ethereum',
-        blockchainId
-    };
-    return token;
+export const getWeb3 = function(nodeEndpoint) {
+    const web3 = new Web3();
+    web3.setProvider(nodeEndpoint);
+    return web3;
+};
+
+export const getContractAddresses = function(ethereum) {
+    if (CONTRACT_ADDRESSES[ethereum.networkType])
+        return CONTRACT_ADDRESSES[ethereum.networkType];
+    throw new Error(ethereum.networkType + ' network not supported');
+};
+
+export const getDecimals = async function(ethereum, token) {
+    if (ethereum.decimals[token] == undefined) {
+        const tokenContract = new ethereum.web3.eth.Contract(abis.ERC20Token, token);
+        ethereum.decimals[token] = await tokenContract.methods.decimals().call();
+    }
+    return ethereum.decimals[token];
+};
+
+async function getRatesSafe(ethereum, paths, amount) {
+    try {
+        return await getRates(ethereum, paths, amount);
+    }
+    catch (error) {
+        if (paths.length > 1) {
+            const mid = paths.length >> 1;
+            const arr1 = await getRatesSafe(ethereum, paths.slice(0, mid), amount);
+            const arr2 = await getRatesSafe(ethereum, paths.slice(mid, paths.length), amount);
+            return [...arr1, ...arr2];
+        }
+        return ['0'];
+    }
 }
 
-export async function getSmartTokens(token: Token) {
-    const isSmartToken = await registry.methods.isSmartToken(token.blockchainId).call();
-    const smartTokens = isSmartToken ? [token.blockchainId] : await registry.methods.getConvertibleTokenSmartTokens(token.blockchainId).call();
-    return smartTokens;
-}
+export const getRates = async function(ethereum, paths, amount) {
+    const calls = paths.map(path => [ethereum.bancorNetwork._address, ethereum.bancorNetwork.methods.getReturnByPath(path, amount).encodeABI()]);
+    const [blockNumber, returnData] = await ethereum.multicallContract.methods.aggregate(calls, false).call();
+    return returnData.map(item => item.success ? Web3.utils.toBN(item.data.substr(0, 66)).toString() : '0');
+};
 
-function registryDataUpdate(registryData, key, value) {
-    if (registryData[key] == undefined)
-        registryData[key] = [value];
-    else if (!registryData[key].includes(value))
-        registryData[key].push(value);
-}
+export const getTokens = async function(ethereum) {
+    const convertibleTokens = await ethereum.converterRegistry.methods.getConvertibleTokens().call();
+    const calls = convertibleTokens.map(convertibleToken => [ethereum.converterRegistry._address, ethereum.converterRegistry.methods.getConvertibleTokenSmartTokens(convertibleToken).encodeABI()]);
+    const [blockNumber, returnData] = await ethereum.multicallContract.methods.aggregate(calls, true).call();
+    const smartTokenLists = returnData.map(item => Array.from(Array((item.data.length - 130) / 64).keys()).map(n => Web3.utils.toChecksumAddress(item.data.substr(64 * n + 154, 40))));
+    return convertibleTokens.reduce((obj, item, index) => ({...obj, [item]: smartTokenLists[index]}), {});
+};
 
-function getAllPathsRecursive(paths, path, targetToken, registryData) {
-    const prevToken = path[path.length - 1];
-    if (prevToken == targetToken)
-        paths.push(path);
-    else for (const nextToken of registryData[prevToken].filter(token => !path.includes(token)))
-        getAllPathsRecursive(paths, [...path, nextToken], targetToken, registryData);
-}
+function getGraph(tokens) {
+    const graph = {};
 
-export async function getAllPathsAndRates(sourceToken, targetToken, amount) {
-    const MULTICALL_ABI = [{"constant":false,"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall.Call[]","name":"calls","type":"tuple[]"},{"internalType":"bool","name":"strict","type":"bool"}],"name":"aggregate","outputs":[{"internalType":"uint256","name":"blockNumber","type":"uint256"},{"components":[{"internalType":"bool","name":"success","type":"bool"},{"internalType":"bytes","name":"data","type":"bytes"}],"internalType":"struct Multicall.Return[]","name":"returnData","type":"tuple[]"}],"payable":false,"stateMutability":"nonpayable","type":"function"}];
-    const MULTICALL_ADDRESS = '0x5Eb3fa2DFECdDe21C950813C665E9364fa609bD2';
-    const multicall = new web3.eth.Contract(MULTICALL_ABI, MULTICALL_ADDRESS);
+    const smartTokens = {};
 
-    const convertibleTokens = await registry.methods.getConvertibleTokens().call();
-    const calls = convertibleTokens.map(convertibleToken => [registry._address, registry.methods.getConvertibleTokenSmartTokens(convertibleToken).encodeABI()]);
-    const [blockNumber, returnData] = await multicall.methods.aggregate(calls, true).call();
+    for (const convertibleToken in tokens) {
+        for (const smartToken of tokens[convertibleToken]) {
+            if (smartTokens[smartToken] == undefined)
+                smartTokens[smartToken] = [convertibleToken];
+            else
+                smartTokens[smartToken].push(convertibleToken);
+        }
+    }
 
-    const registryData = {};
+    for (const smartToken in smartTokens) {
+        for (const convertibleToken of smartTokens[smartToken]) {
+            updateGraph(graph, smartToken, [smartToken, convertibleToken]);
+            updateGraph(graph, convertibleToken, [smartToken, smartToken]);
+        }
+    }
 
-    for (let i = 0; i < returnData.length; i++) {
-        for (const smartToken of Array.from(Array((returnData[i].data.length - 130) / 64).keys()).map(n => Web3.utils.toChecksumAddress(returnData[i].data.substr(64 * n + 154, 40)))) {
-            if (convertibleTokens[i] != smartToken) {
-                registryDataUpdate(registryData, convertibleTokens[i], smartToken);
-                registryDataUpdate(registryData, smartToken, convertibleTokens[i]);
+    for (const smartToken in smartTokens) {
+        for (const sourceToken of smartTokens[smartToken]) {
+            for (const targetToken of smartTokens[smartToken]) {
+                if (sourceToken != targetToken)
+                    updateGraph(graph, sourceToken, [smartToken, targetToken]);
             }
         }
     }
 
-    const paths = [];
-    getAllPathsRecursive(paths, [Web3.utils.toChecksumAddress(sourceToken)], Web3.utils.toChecksumAddress(targetToken), registryData);
-
-    const sourceDecimals = await getDecimals(sourceToken);
-    const targetDecimals = await getDecimals(targetToken);
-    const rates = await getRates(multicall, paths, toWei(amount, sourceDecimals));
-    return [paths, rates.map(rate => fromWei(rate, targetDecimals))];
+    return graph;
 }
 
-const getDecimals = async function(token) {
-    return await getTokenDecimals(token);
-};
+function getTrees(graph, pivotTokens) {
+    const trees = {};
 
-const getRates = async function(multicall, paths, amount) {
-    const calls = paths.map(path => [network._address, network.methods.getReturnByPath(path, amount).encodeABI()]);
-    const [blockNumber, returnData] = await multicall.methods.aggregate(calls, false).call();
-    return returnData.map(item => item.success ? Web3.utils.toBN(item.data.substr(0, 66)).toString() : "0");
-};
+    for (const pivotToken of pivotTokens)
+        trees[pivotToken] = getTree(graph, pivotToken);
+
+    return trees;
+}
+
+function updateGraph(graph, key, value) {
+    if (graph[key] == undefined)
+        graph[key] = [value];
+    else
+        graph[key].push(value);
+}
+
+function getTree(graph, root) {
+    const tree = {[root]: []};
+    const queue = [root];
+    while (queue.length > 0) {
+        const dst = queue.shift();
+        for (const src of graph[dst].filter(src => tree[src[1]] === undefined)) {
+            tree[src[1]] = [src[0], dst];
+            queue.push(src[1]);
+        }
+    }
+    return tree;
+}
+
+function getAllPathsRecursive(paths, graph, tokens, destToken) {
+    const prevToken = tokens[tokens.length - 1];
+    if (prevToken == destToken)
+        paths.push(tokens);
+    else for (const pair of graph[prevToken].filter(pair => !tokens.includes(pair[1])))
+        getAllPathsRecursive(paths, graph, [...tokens, ...pair], destToken);
+}
+
+function getOnePathRecursive(tree, token) {
+    if (tree[token].length > 0)
+        return [token, tree[token][0], ...getOnePathRecursive(tree, tree[token][1])];
+    return [token];
+}
+
+function getMergedPath(sourcePath, targetPath) {
+    if (sourcePath.length > 0 && targetPath.length > 0) {
+        let i = sourcePath.length - 1;
+        let j = targetPath.length - 1;
+        while (i >= 0 && j >= 0 && sourcePath[i] == targetPath[j]) {
+            i--;
+            j--;
+        }
+
+        const path = [];
+        for (let m = 0; m <= i + 1; m++)
+            path.push(sourcePath[m]);
+        for (let n = j; n >= 0; n--)
+            path.push(targetPath[n]);
+
+        let length = 0;
+        for (let p = 0; p < path.length; p += 1) {
+            for (let q = p + 2; q < path.length - p % 2; q += 2) {
+                if (path[p] == path[q])
+                    p = q;
+            }
+            path[length++] = path[p];
+        }
+
+        return path.slice(0, length);
+    }
+
+    return [];
+}
